@@ -518,6 +518,35 @@ class Dome : public DefaultDevice
              */
         virtual void UpdateAutoSync();
 
+        /**
+         * @brief Report communication result from concrete drivers.
+         * Drivers should call this after command I/O to drive reconnect scheduling.
+         */
+        void reportConnectionResult(bool success, const char *reason = nullptr);
+
+        /**
+         * @brief Process any pending reconnect attempt in a non-blocking way.
+         * Call this from driver TimerHit() before normal polling.
+         */
+        void processReconnect();
+
+        /**
+         * @return True when reconnect attempts are pending.
+         */
+        bool isReconnectPending() const;
+
+        /**
+         * @brief Attempt a reconnect using the active connection plugin.
+         * Concrete drivers may override for transport/protocol specific reconnects.
+         */
+        virtual bool attemptReconnect();
+
+        /**
+         * @brief Called after a successful reconnect attempt.
+         * Concrete drivers may override to refresh startup state.
+         */
+        virtual void onReconnectSuccess() {}
+
         /** \brief perform handshake with device to check communication */
         virtual bool Handshake();
 
@@ -540,6 +569,9 @@ class Dome : public DefaultDevice
         INDI::PropertySwitch AbortSP {1};
 
         INDI::PropertyNumber DomeParamNP {1};
+
+        // Reconnect policy for TCP/serial communication failures.
+        INDI::PropertyNumber ReconnectNP {2};
 
         INDI::PropertyNumber DomeSyncNP {1};
 
@@ -623,6 +655,20 @@ class Dome : public DefaultDevice
         // Do we have valid coords from mount driver?
         bool HaveRaDec = false;
 
+        // Reconnect state
+        int m_ConnectionFailureCount { 0 };
+        bool m_ReconnectPending { false };
+        uint64_t m_NextReconnectAttemptMs { 0 };
+        uint8_t m_ReconnectAttemptCount { 0 };
+
+        static constexpr int DEFAULT_MAX_CONSECUTIVE_FAILURES { 2 };
+        static constexpr int DEFAULT_RECONNECT_BASE_DELAY_MS { 500 };
+        static constexpr int MIN_FAILURES_BEFORE_RECONNECT { 1 };
+        static constexpr int MAX_FAILURES_BEFORE_RECONNECT { 10 };
+        static constexpr int MIN_RECONNECT_DELAY_MS { 100 };
+        static constexpr int MAX_RECONNECT_DELAY_SETTING_MS { 5000 };
+        static constexpr int MAX_RECONNECT_DELAY_MS { 8000 };
+
     private:
         void processButton(const char * button_n, ISState state);
         void triggerSnoop(const char * driverName, const char * propertyName);
@@ -662,6 +708,12 @@ class Dome : public DefaultDevice
         double Axis1DefaultParkPosition;
 
         bool callHandshake();
+        int maxConsecutiveFailures() const;
+        int reconnectBaseDelayMs() const;
+        int reconnectMaxDelayMs() const;
+        int computeReconnectDelayMs(uint8_t attemptCount) const;
+        void scheduleReconnect(const char *reason);
+        void resetReconnectState();
         uint8_t domeConnection = CONNECTION_SERIAL | CONNECTION_TCP;
 
         // How often we update horizontal coordinates (10 seconds).

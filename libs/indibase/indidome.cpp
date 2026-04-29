@@ -33,6 +33,8 @@
 #include <libnova/transform.h>
 
 #include <cerrno>
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <wordexp.h>
@@ -46,6 +48,16 @@
 
 namespace INDI
 {
+
+namespace
+{
+uint64_t monotonicMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 ///
@@ -197,6 +209,13 @@ bool Dome::initProperties()
     DomeParamNP.fill(getDeviceName(), "DOME_PARAMS", "Params", DOME_SLAVING_TAB, IP_RW, 60, IPS_OK);
     DomeParamNP.load();
 
+    ReconnectNP[0].fill("FAILURES_BEFORE_RECONNECT", "Max Failures", "%.f", MIN_FAILURES_BEFORE_RECONNECT,
+                        MAX_FAILURES_BEFORE_RECONNECT, 1, DEFAULT_MAX_CONSECUTIVE_FAILURES);
+    ReconnectNP[1].fill("DELAY_MS", "Base delay (ms)", "%.f", MIN_RECONNECT_DELAY_MS,
+                        MAX_RECONNECT_DELAY_SETTING_MS, 100, DEFAULT_RECONNECT_BASE_DELAY_MS);
+    ReconnectNP.fill(getDeviceName(), "RECONNECT_POLICY", "Reconnect", CONNECTION_TAB, IP_RW, 60, IPS_IDLE);
+    ReconnectNP.load();
+
     // @INDI_STANDARD_PROPERTY@
     ParkSP[0].fill("PARK", "Park(ed)", ISS_OFF);
     ParkSP[1].fill("UNPARK", "UnPark(ed)", ISS_OFF);
@@ -273,6 +292,7 @@ void Dome::ISGetProperties(const char * dev)
 
     defineProperty(ActiveDeviceTP);
     defineProperty(MountPolicySP);
+    defineProperty(ReconnectNP);
 
     controller->ISGetProperties(dev);
     return;
@@ -335,6 +355,9 @@ bool Dome::updateProperties()
     }
     else
     {
+        PortFD = -1;
+        resetReconnectState();
+
         if (HasShutter())
         {
             deleteProperty(DomeShutterSP);
@@ -431,6 +454,28 @@ bool Dome::ISNewNumber(const char * dev, const char * name, double values[], cha
             if (DomeAutoSyncSP[INDI_ENABLED].getState() == ISS_ON)
                 LOGF_INFO("Dome slaving differential threshold updated to %.2f degrees.", DomeParamNP[0].getValue());
             saveConfig(DomeParamNP);
+            return true;
+        }
+        else if (ReconnectNP.isNameMatch(name))
+        {
+            ReconnectNP.update(values, names, n);
+
+            int failuresBeforeReconnect = static_cast<int>(ReconnectNP[0].getValue());
+            int delayMs                 = static_cast<int>(ReconnectNP[1].getValue());
+
+            failuresBeforeReconnect =
+                std::clamp(failuresBeforeReconnect, MIN_FAILURES_BEFORE_RECONNECT, MAX_FAILURES_BEFORE_RECONNECT);
+            delayMs = std::clamp(delayMs, MIN_RECONNECT_DELAY_MS, MAX_RECONNECT_DELAY_SETTING_MS);
+
+            ReconnectNP[0].setValue(failuresBeforeReconnect);
+            ReconnectNP[1].setValue(delayMs);
+            ReconnectNP.setState(IPS_OK);
+            ReconnectNP.apply();
+            saveConfig(ReconnectNP);
+
+            if (m_ReconnectPending)
+                m_NextReconnectAttemptMs = monotonicMs();
+
             return true;
         }
         else if (DomeSpeedNP.isNameMatch(name))
@@ -1091,6 +1136,7 @@ bool Dome::saveConfigItems(FILE * fp)
     DomeMeasurementsNP.save(fp);
     DomeAutoSyncSP.save(fp);
     OTASideSP.save(fp);
+    ReconnectNP.save(fp);
 
     if (HasBacklash())
     {
@@ -2392,15 +2438,152 @@ bool Dome::Handshake()
     return false;
 }
 
+void Dome::reportConnectionResult(bool success, const char *reason)
+{
+    if (!isConnected())
+        return;
+
+    if (success)
+    {
+        m_ConnectionFailureCount = 0;
+        return;
+    }
+
+    m_ConnectionFailureCount++;
+    if (m_ConnectionFailureCount >= maxConsecutiveFailures())
+        scheduleReconnect(reason ? reason : "communication failure");
+}
+
+void Dome::processReconnect()
+{
+    if (!m_ReconnectPending)
+        return;
+
+    const uint64_t nowMs = monotonicMs();
+    if (nowMs < m_NextReconnectAttemptMs)
+        return;
+
+    if (attemptReconnect())
+    {
+        LOG_INFO("Reconnect succeeded.");
+        resetReconnectState();
+        onReconnectSuccess();
+        return;
+    }
+
+    m_ReconnectAttemptCount++;
+    const int backoffMs = computeReconnectDelayMs(m_ReconnectAttemptCount);
+    m_NextReconnectAttemptMs = nowMs + static_cast<uint64_t>(backoffMs);
+    LOGF_WARN("Reconnect attempt %u failed, next retry in %d ms", m_ReconnectAttemptCount, backoffMs);
+}
+
+bool Dome::isReconnectPending() const
+{
+    return m_ReconnectPending;
+}
+
+bool Dome::attemptReconnect()
+{
+    auto activeConnection = getActiveConnection();
+    if (activeConnection == nullptr)
+    {
+        LOG_WARN("Cannot reconnect: no active connection plugin.");
+        return false;
+    }
+
+    LOGF_INFO("Attempting reconnect to %s...", getDeviceName());
+
+    if (activeConnection == serialConnection)
+    {
+        serialConnection->Disconnect();
+        if (!serialConnection->Connect())
+        {
+            LOG_WARN("Serial reconnect attempt failed.");
+            return false;
+        }
+    }
+    else if (activeConnection == tcpConnection)
+    {
+        tcpConnection->Disconnect();
+        if (!tcpConnection->Connect())
+        {
+            LOG_WARN("TCP reconnect attempt failed.");
+            return false;
+        }
+    }
+    else
+    {
+        LOG_WARN("Cannot reconnect: active connection plugin is unsupported by Dome base.");
+        return false;
+    }
+
+    return callHandshake();
+}
+
+int Dome::maxConsecutiveFailures() const
+{
+    return std::clamp(static_cast<int>(ReconnectNP[0].getValue()), MIN_FAILURES_BEFORE_RECONNECT,
+                      MAX_FAILURES_BEFORE_RECONNECT);
+}
+
+int Dome::reconnectBaseDelayMs() const
+{
+    return std::clamp(static_cast<int>(ReconnectNP[1].getValue()), MIN_RECONNECT_DELAY_MS,
+                      MAX_RECONNECT_DELAY_SETTING_MS);
+}
+
+int Dome::reconnectMaxDelayMs() const
+{
+    return MAX_RECONNECT_DELAY_MS;
+}
+
+int Dome::computeReconnectDelayMs(uint8_t attemptCount) const
+{
+    int delayMs = reconnectBaseDelayMs();
+
+    for (uint8_t i = 0; i < attemptCount && delayMs < reconnectMaxDelayMs() / 2; i++)
+        delayMs *= 2;
+
+    return std::min(delayMs, reconnectMaxDelayMs());
+}
+
+void Dome::scheduleReconnect(const char *reason)
+{
+    if (!m_ReconnectPending)
+    {
+        LOGF_WARN("Scheduling reconnect after %d consecutive failures (%s)", maxConsecutiveFailures(), reason);
+        m_ReconnectPending      = true;
+        m_ReconnectAttemptCount = 0;
+    }
+
+    if (m_NextReconnectAttemptMs == 0)
+        m_NextReconnectAttemptMs = monotonicMs();
+}
+
+void Dome::resetReconnectState()
+{
+    m_ConnectionFailureCount = 0;
+    m_ReconnectPending       = false;
+    m_ReconnectAttemptCount  = 0;
+    m_NextReconnectAttemptMs = 0;
+}
+
 bool Dome::callHandshake()
 {
+    PortFD = -1;
+
     if (domeConnection > 0)
     {
         if (getActiveConnection() == serialConnection)
             PortFD = serialConnection->getPortFD();
         else if (getActiveConnection() == tcpConnection)
             PortFD = tcpConnection->getPortFD();
+        else
+            LOG_WARN("Handshake requested but active connection is not a registered serial/tcp plugin.");
     }
+
+    if (PortFD < 0)
+        LOG_WARN("Handshake proceeding with invalid connection file descriptor.");
 
     return Handshake();
 }
@@ -2414,7 +2597,7 @@ void Dome::setDomeConnection(const uint8_t &value)
 {
     uint8_t mask = CONNECTION_SERIAL | CONNECTION_TCP | CONNECTION_NONE;
 
-    if (value == 0 || (mask & value) == 0)
+    if (value == 0 || (value & ~mask) != 0 || (mask & value) == 0)
     {
         LOGF_ERROR( "Invalid connection mode %d", value);
         return;
