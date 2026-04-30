@@ -2487,18 +2487,29 @@ bool Dome::Handshake()
 
 void Dome::reportConnectionResult(bool success, const char *reason)
 {
-    if (!isConnected())
-        return;
+    // Accept reports even when the device is currently marked disconnected. Drivers may
+    // continue to emit connection results while reconnecting or when the CONNECTION
+    // property is not IPS_OK. Previously this method early-returned when
+    // !isConnected(), which prevented failure counting and reconnect scheduling.
 
     if (success)
     {
+        // Successful I/O resets the failure counter.
         m_ConnectionFailureCount = 0;
         return;
     }
 
+    // Failure: increment and schedule reconnect when threshold reached.
     m_ConnectionFailureCount++;
+    LOGF_WARN("Connection failure %d/%d: %s", m_ConnectionFailureCount, maxConsecutiveFailures(), reason ? reason : "(no reason)");
     if (m_ConnectionFailureCount >= maxConsecutiveFailures())
+    {
+        // Inform clients of the observed communication failure (they will see ALERT),
+        // then schedule reconnect (scheduleReconnect will mark BUSY while reconnecting).
+        LOGF_WARN("Max failures reached (%d), scheduling reconnect", m_ConnectionFailureCount);
+        setConnected(false, IPS_ALERT, reason ? reason : "communication failure");
         scheduleReconnect(reason ? reason : "communication failure");
+    }
 }
 
 void Dome::processReconnect()
@@ -2510,9 +2521,14 @@ void Dome::processReconnect()
     if (nowMs < m_NextReconnectAttemptMs)
         return;
 
+    // Mark the CONNECTION property as BUSY while we actively attempt reconnects so
+    // clients can show activity. Do this before attempting to reconnect.
+    setConnected(false, IPS_BUSY, "Reconnecting...");
+
     if (attemptReconnect())
     {
         LOG_INFO("Reconnect succeeded.");
+        setConnected(true, IPS_OK, "Reconnected");
         resetReconnectState();
         onReconnectSuccess();
         return;
@@ -2601,6 +2617,8 @@ void Dome::scheduleReconnect(const char *reason)
         LOGF_WARN("Scheduling reconnect after %d consecutive failures (%s)", maxConsecutiveFailures(), reason);
         m_ReconnectPending      = true;
         m_ReconnectAttemptCount = 0;
+        // Show busy status immediately so clients know reconnects are pending.
+        setConnected(false, IPS_BUSY, reason ? reason : "Reconnecting scheduled");
     }
 
     if (m_NextReconnectAttemptMs == 0)
