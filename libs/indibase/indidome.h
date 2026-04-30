@@ -686,6 +686,12 @@ class Dome : public DefaultDevice
         void processButton(const char * button_n, ISState state);
         void triggerSnoop(const char * driverName, const char * propertyName);
         /**
+         * @brief transitionToState Central helper to perform a dome state transition and
+         * log the change consistently. Use this instead of calling setDomeState() directly
+         * from methods that manage dome state.
+         */
+        void transitionToState(const DomeState &newState, const char *reason = nullptr);
+        /**
          * @brief SyncParkStatus Update the state and switches for parking
          * @param isparked True if parked, false otherwise.
          */

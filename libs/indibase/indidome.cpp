@@ -1368,6 +1368,47 @@ void Dome::setDomeState(const Dome::DomeState &value)
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+///
+////////////////////////////////////////////////////////////////////////////////////////////////////
+/**
+ * @brief domeStateName Return textual representation of DomeState for logging.
+ */
+static const char *domeStateName(Dome::DomeState s)
+{
+    switch (s)
+    {
+        case Dome::DOME_IDLE: return "DOME_IDLE";
+        case Dome::DOME_MOVING: return "DOME_MOVING";
+        case Dome::DOME_SYNCED: return "DOME_SYNCED";
+        case Dome::DOME_PARKING: return "DOME_PARKING";
+        case Dome::DOME_UNPARKING: return "DOME_UNPARKING";
+        case Dome::DOME_PARKED: return "DOME_PARKED";
+        case Dome::DOME_UNPARKED: return "DOME_UNPARKED";
+        case Dome::DOME_UNKNOWN: return "DOME_UNKNOWN";
+        case Dome::DOME_ERROR: return "DOME_ERROR";
+        default: return "DOME_?";
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+/// Centralized transition helper that logs state changes and delegates to setDomeState()
+////////////////////////////////////////////////////////////////////////////////////////////////////
+void Dome::transitionToState(const DomeState &newState, const char *reason)
+{
+    // Log only when the state actually changes to avoid log flooding
+    if (m_DomeState != newState)
+    {
+        if (reason)
+            LOGF_INFO("Dome state transitioning from %s to %s: %s", domeStateName(m_DomeState), domeStateName(newState), reason);
+        else
+            LOGF_INFO("Dome state transitioning from %s to %s", domeStateName(m_DomeState), domeStateName(newState));
+    }
+
+    // Delegate the actual state handling (property updates, flags) to existing implementation
+    setDomeState(newState);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
 /// The problem to get a dome azimuth given a telescope azimuth, altitude and geometry
 /// (telescope placement, mount geometry) can be seen as solve the intersection between the optical axis
 /// with the dome, that is, the intersection between a line and a sphere.
@@ -1782,29 +1823,35 @@ void Dome::SetParkDataType(Dome::DomeParkData type)
         default:
             break;
     }
+
+    // Ensure any interested parties get a consistent log of the current state after changing park data type
+    transitionToState(m_DomeState, "Park data type changed");
 }
 
 void Dome::SyncParkStatus(bool isparked)
 {
     IsParked = isparked;
 
-    setDomeState(DOME_IDLE);
+    // Normalize state to idle first, then transition to parked/unparked as appropriate.
+    transitionToState(DOME_IDLE);
 
     if (IsParked)
     {
-        setDomeState(DOME_PARKED);
-        LOG_INFO("Dome is parked.");
+        transitionToState(DOME_PARKED, "Park status updated");
     }
     else
     {
-        setDomeState(DOME_UNPARKED);
-        LOG_INFO("Dome is unparked.");
+        transitionToState(DOME_UNPARKED, "Park status updated");
     }
 }
 
 void Dome::SetParked(bool isparked)
 {
     SyncParkStatus(isparked);
+
+    // Ensure consistent logging/transition after the park change request (idempotent if SyncParkStatus already transitioned)
+    transitionToState(isparked ? DOME_PARKED : DOME_UNPARKED, "SetParked invoked");
+
     WriteParkData();
 }
 
