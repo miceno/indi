@@ -63,6 +63,19 @@ class TCP;
 
    Developers need to subclass INDI::Dome to implement any driver for Domes within INDI.
 
+   RECONNECT_POLICY Property
+
+   The dome base class supports a non-blocking reconnect policy for TCP/serial connections.
+   The reconnect policy is controlled by the following properties:
+
+   - Max Failures: Number of consecutive communication failures before a reconnect is triggered.
+   - Base delay (ms): The base delay (in milliseconds) for exponential backoff between reconnect attempts.
+
+   When the number of consecutive failures reaches the Max Failures threshold, the driver will attempt to reconnect.
+   The delay between reconnect attempts increases exponentially, starting from the Base delay (ms) value.
+
+   These settings can be adjusted in the INDI Control Panel under the RECONNECT_POLICY property.
+
   \note The code used calculate dome target AZ and ZD is written by Ferran Casarramona, and adapted from code from Markus Wildi. The transformations are based on the paper Matrix Method for Coordinates
  Transformation written by Toshimi Taki (http://www.asahi-net.or.jp/~zs3t-tk).
 
