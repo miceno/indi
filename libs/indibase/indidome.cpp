@@ -303,21 +303,7 @@ void Dome::ISGetProperties(const char * dev)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 bool Dome::updateProperties()
 {
-    // Consider CONNECTION states OK and BUSY as "connected enough" for
-    // purposes of keeping dome properties defined. Treating BUSY as connected
-    // prevents the driver from deleting properties while reconnect attempts
-    // are in progress (the CONNECTION property may be BUSY during reconnect).
-    bool connActive = false;
-    {
-        auto connSP = getSwitch(INDI::SP::CONNECTION);
-        if (connSP)
-        {
-            IPState s = connSP.getState();
-            connActive = (s == IPS_OK || s == IPS_BUSY);
-        }
-    }
-
-    if (connActive)
+    if (isConnected())
     {
         if (HasShutter())
         {
@@ -2512,14 +2498,7 @@ void Dome::reportConnectionResult(bool success, const char *reason)
 
     m_ConnectionFailureCount++;
     if (m_ConnectionFailureCount >= maxConsecutiveFailures())
-    {
-        // Inform clients that we observed a communication failure
-        // and mark the CONNECTION property as ALERT.
-        setConnected(true, IPS_ALERT, reason ? reason : "communication failure");
-
-        // Schedule reconnect attempts (will transition to BUSY when attempts start).
         scheduleReconnect(reason ? reason : "communication failure");
-    }
 }
 
 void Dome::processReconnect()
@@ -2531,21 +2510,14 @@ void Dome::processReconnect()
     if (nowMs < m_NextReconnectAttemptMs)
         return;
 
-    // Indicate to clients that a reconnect attempt is in progress.
-    setConnected(true, IPS_BUSY, "Reconnecting...");
-
     if (attemptReconnect())
     {
         LOG_INFO("Reconnect succeeded.");
-
-        // Mark device as connected/OK for clients and reset reconnect bookkeeping.
-        setConnected(true, IPS_OK, "Reconnected");
         resetReconnectState();
         onReconnectSuccess();
         return;
     }
 
-    // Attempt failed: keep pending state and schedule next retry.
     m_ReconnectAttemptCount++;
     const int backoffMs = computeReconnectDelayMs(m_ReconnectAttemptCount);
     m_NextReconnectAttemptMs = nowMs + static_cast<uint64_t>(backoffMs);
@@ -2629,9 +2601,6 @@ void Dome::scheduleReconnect(const char *reason)
         LOGF_WARN("Scheduling reconnect after %d consecutive failures (%s)", maxConsecutiveFailures(), reason);
         m_ReconnectPending      = true;
         m_ReconnectAttemptCount = 0;
-        // Immediately indicate to clients that reconnects are pending and the
-        // driver is working on restoring the connection.
-        // setConnected(true, IPS_BUSY, reason ? reason : "Reconnecting scheduled");
     }
 
     if (m_NextReconnectAttemptMs == 0)
