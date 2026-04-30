@@ -24,6 +24,7 @@
 
 #include "indicom.h"
 #include "indicontroller.h"
+#include "indistandardproperty.h"
 #include "inditimer.h"
 #include "connectionplugins/connectionserial.h"
 #include "connectionplugins/connectiontcp.h"
