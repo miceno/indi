@@ -2507,7 +2507,6 @@ void Dome::reportConnectionResult(bool success, const char *reason)
         // Inform clients of the observed communication failure (they will see ALERT),
         // then schedule reconnect (scheduleReconnect will mark BUSY while reconnecting).
         LOGF_WARN("Max failures reached (%d), scheduling reconnect", m_ConnectionFailureCount);
-        setConnected(false, IPS_ALERT, reason ? reason : "communication failure");
         scheduleReconnect(reason ? reason : "communication failure");
     }
 }
@@ -2520,10 +2519,6 @@ void Dome::processReconnect()
     const uint64_t nowMs = monotonicMs();
     if (nowMs < m_NextReconnectAttemptMs)
         return;
-
-    // Mark the CONNECTION property as BUSY while we actively attempt reconnects so
-    // clients can show activity. Do this before attempting to reconnect.
-    setConnected(false, IPS_BUSY, "Reconnecting...");
 
     if (attemptReconnect())
     {
@@ -2617,8 +2612,6 @@ void Dome::scheduleReconnect(const char *reason)
         LOGF_WARN("Scheduling reconnect after %d consecutive failures (%s)", maxConsecutiveFailures(), reason);
         m_ReconnectPending      = true;
         m_ReconnectAttemptCount = 0;
-        // Show busy status immediately so clients know reconnects are pending.
-        setConnected(false, IPS_BUSY, reason ? reason : "Reconnecting scheduled");
     }
 
     if (m_NextReconnectAttemptMs == 0)
